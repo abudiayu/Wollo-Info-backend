@@ -1,7 +1,6 @@
 /**
  * adminOnly — runs AFTER authMiddleware.
- * Checks the role directly from the `users` table on every request
- * so a stale token never causes a false 403.
+ * Reads the role directly from the users table so stale tokens are ignored.
  */
 module.exports = function makeAdminOnly(pool) {
   return async function adminOnly(req, res, next) {
@@ -10,13 +9,10 @@ module.exports = function makeAdminOnly(pool) {
         'SELECT id, role FROM users WHERE id = ? LIMIT 1',
         [req.user.id]
       );
-
-      if (!user) {
-        return res.status(403).json({ error: 'Account not found.' });
-      }
+      if (!user) return res.status(403).json({ error: 'Account not found.' });
 
       if (process.env.NODE_ENV !== 'production') {
-        console.log(`[adminOnly] id=${req.user.id} DB role="${user.role}" token role="${req.user.role}"`);
+        console.log(`[adminOnly] id=${req.user.id} DB role="${user.role}"`);
       }
 
       if (user.role !== 'admin') {
@@ -26,7 +22,6 @@ module.exports = function makeAdminOnly(pool) {
         });
       }
 
-      // Attach the fresh DB role to req.user
       req.user.role = 'admin';
       next();
     } catch (err) {

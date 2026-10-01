@@ -1,3 +1,4 @@
+const path           = require('path');
 require('dotenv').config();
 const express        = require('express');
 const cors           = require('cors');
@@ -5,6 +6,9 @@ const mysql          = require('mysql2/promise');
 const authMiddleware = require('./middleware/authMiddleware');
 const authRouter     = require('./routes/auth');
 const adminRouter    = require('./routes/admin');
+const mediaRouter    = require('./routes/media');
+const contentRouter  = require('./routes/content');
+const publicRouter   = require('./routes/public');
 
 const {
   PORT        = 5000,
@@ -28,9 +32,9 @@ const pool = mysql.createPool({
   dateStrings: true,
 });
 
-// ── Ensure all three account tables exist ───────────────────
+// ── Ensure all account + content tables exist ───────────────
 async function ensureTables() {
-  // Single users table — role column holds 'user' or 'admin'
+  // users table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id            INT          NOT NULL AUTO_INCREMENT,
@@ -45,7 +49,7 @@ async function ensureTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  // Ensure avatar_url column exists (backward compat)
+  // Ensure avatar_url column exists
   const [cols] = await pool.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'users' AND COLUMN_NAME = 'avatar_url'`,
@@ -56,7 +60,7 @@ async function ensureTables() {
     console.log('Migration: added avatar_url to users.');
   }
 
-  // Ensure role column exists (backward compat)
+  // Ensure role column exists
   const [roleCols] = await pool.query(
     `SELECT COLUMN_NAME FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'users' AND COLUMN_NAME = 'role'`,
@@ -66,6 +70,120 @@ async function ensureTables() {
     await pool.query(`ALTER TABLE users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'user'`);
     console.log('Migration: added role column to users.');
   }
+
+  // ── Content Manager tables ──────────────────────────────────
+
+  // media_folders (must come before media)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS media_folders (
+      id         INT          NOT NULL AUTO_INCREMENT,
+      name       VARCHAR(200) NOT NULL,
+      parent_id  INT              NULL DEFAULT NULL,
+      created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_mf_parent (parent_id),
+      CONSTRAINT fk_mf_parent FOREIGN KEY (parent_id)
+        REFERENCES media_folders(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // media
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS media (
+      id            INT          NOT NULL AUTO_INCREMENT,
+      original_name VARCHAR(255) NOT NULL,
+      stored_name   VARCHAR(255) NOT NULL,
+      mime_type     VARCHAR(120) NOT NULL,
+      size          INT          NOT NULL DEFAULT 0,
+      type          ENUM('image','file','folder-asset') NOT NULL DEFAULT 'file',
+      folder_id     INT              NULL DEFAULT NULL,
+      url           VARCHAR(512) NOT NULL,
+      uploaded_by   INT          NOT NULL,
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_media_folder   (folder_id),
+      KEY idx_media_uploader (uploaded_by),
+      CONSTRAINT fk_media_folder   FOREIGN KEY (folder_id)   REFERENCES media_folders(id) ON DELETE SET NULL,
+      CONSTRAINT fk_media_uploader FOREIGN KEY (uploaded_by) REFERENCES users(id)          ON DELETE RESTRICT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // sections
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sections (
+      id          INT          NOT NULL AUTO_INCREMENT,
+      slug        VARCHAR(60)  NOT NULL,
+      title       VARCHAR(200) NOT NULL,
+      description TEXT             NULL,
+      sort_order  INT          NOT NULL DEFAULT 0,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_sections_slug (slug)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // seed the three sections (safe to re-run)
+  await pool.query(`
+    INSERT IGNORE INTO sections (slug, title, description, sort_order) VALUES
+      ('motivation',  'Motivation',   'Motivational stories and advice for students.', 1),
+      ('opportunity', 'Opportunities','Clubs, programs and activities at Wollo University.', 2),
+      ('department',  'Departments',  'Academic departments and faculties.', 3);
+  `);
+
+  // content_items
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS content_items (
+      id             INT          NOT NULL AUTO_INCREMENT,
+      section_id     INT          NOT NULL,
+      title          VARCHAR(255) NOT NULL,
+      body           LONGTEXT         NULL,
+      status         ENUM('draft','published','archived') NOT NULL DEFAULT 'draft',
+      cover_media_id INT              NULL DEFAULT NULL,
+      sort_order     INT          NOT NULL DEFAULT 0,
+      created_by     INT          NOT NULL,
+      created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      published_at   DATETIME         NULL DEFAULT NULL,
+      PRIMARY KEY (id),
+      KEY idx_ci_section (section_id),
+      KEY idx_ci_status  (status),
+      KEY idx_ci_creator (created_by),
+      CONSTRAINT fk_ci_section FOREIGN KEY (section_id)     REFERENCES sections(id)    ON DELETE RESTRICT,
+      CONSTRAINT fk_ci_cover   FOREIGN KEY (cover_media_id) REFERENCES media(id)       ON DELETE SET NULL,
+      CONSTRAINT fk_ci_creator FOREIGN KEY (created_by)     REFERENCES users(id)       ON DELETE RESTRICT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // content_media (gallery)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS content_media (
+      content_id INT NOT NULL,
+      media_id   INT NOT NULL,
+      sort_order INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (content_id, media_id),
+      KEY idx_cm_media (media_id),
+      CONSTRAINT fk_cm_content FOREIGN KEY (content_id) REFERENCES content_items(id) ON DELETE CASCADE,
+      CONSTRAINT fk_cm_media   FOREIGN KEY (media_id)   REFERENCES media(id)          ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // content_versions
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS content_versions (
+      id         INT      NOT NULL AUTO_INCREMENT,
+      content_id INT      NOT NULL,
+      title      VARCHAR(255) NOT NULL,
+      body       LONGTEXT     NULL,
+      edited_by  INT      NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_cv_content (content_id),
+      KEY idx_cv_editor  (edited_by),
+      CONSTRAINT fk_cv_content FOREIGN KEY (content_id) REFERENCES content_items(id) ON DELETE CASCADE,
+      CONSTRAINT fk_cv_editor  FOREIGN KEY (edited_by)  REFERENCES users(id)          ON DELETE RESTRICT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  console.log('✓ All tables ready (users + content manager)');
 }
 
 // ── Schema introspection ────────────────────────────────────
@@ -99,7 +217,10 @@ class HttpError extends Error {
 }
 
 // These tables are never accessible via the generic /api/:table routes
-const BLOCKED_TABLES = new Set(['users']);
+const BLOCKED_TABLES = new Set([
+  'users', 'sections', 'content_items', 'content_media',
+  'content_versions', 'media', 'media_folders',
+]);
 
 function getTable(name) {
   if (BLOCKED_TABLES.has(name)) throw new HttpError(403, `Table "${name}" is not accessible.`);
@@ -123,9 +244,15 @@ function pickColumns(table, body) {
   return data;
 }
 
-// ── Mount auth + admin routers ───────────────────────────────
-app.use('/api/auth',  authRouter(pool));
-app.use('/api/admin', adminRouter(pool));
+// ── Static uploads ───────────────────────────────────────────
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// ── Mount auth + admin + content routers ─────────────────────
+app.use('/api/auth',    authRouter(pool));
+app.use('/api/admin',   adminRouter(pool));
+app.use('/api/media',   mediaRouter(pool));
+app.use('/api/content', contentRouter(pool));
+app.use('/api/public',  publicRouter(pool));
 
 // ── Health ───────────────────────────────────────────────────
 app.get('/api/health', asyncHandler(async (_req, res) => {
