@@ -106,5 +106,80 @@ module.exports = function adminRouter(pool) {
     }
   });
 
+  /* ──────────────────────────────────────────
+     PATCH /api/admin/users/:id/role
+     Promotes or demotes a user's role.
+     Admins cannot demote themselves.
+     ────────────────────────────────────────── */
+  router.patch('/users/:id/role', async (req, res) => {
+    try {
+      const userId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(userId) || userId < 1) {
+        return res.status(400).json({ error: 'Invalid user ID.' });
+      }
+
+      const { role } = req.body;
+      const allowed = ['user', 'staff', 'admin'];
+      if (!role || !allowed.includes(role)) {
+        return res.status(400).json({ error: `Role must be one of: ${allowed.join(', ')}.` });
+      }
+
+      // Prevent admin from demoting themselves
+      if (String(req.user.id) === String(userId) && role !== 'admin') {
+        return res.status(403).json({ error: 'You cannot change your own role.' });
+      }
+
+      const [result] = await pool.query(
+        'UPDATE users SET role = ? WHERE id = ?',
+        [role, userId]
+      );
+
+      if (!result.affectedRows) {
+        return res.status(404).json({ error: 'User not found.' });
+      }
+
+      const [[updated]] = await pool.query(
+        `SELECT id, full_name, email, avatar_url, role, created_at
+           FROM users WHERE id = ? LIMIT 1`,
+        [userId]
+      );
+
+      return res.json(safe(updated));
+    } catch (err) {
+      console.error('Admin PATCH /users/:id/role error:', err);
+      return res.status(500).json({ error: 'Failed to update role.' });
+    }
+  });
+
+  /* ──────────────────────────────────────────
+     DELETE /api/admin/users/:id
+     Permanently deletes a user account.
+     Admins cannot delete themselves.
+     ────────────────────────────────────────── */
+  router.delete('/users/:id', async (req, res) => {
+    try {
+      const userId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(userId) || userId < 1) {
+        return res.status(400).json({ error: 'Invalid user ID.' });
+      }
+
+      // Prevent self-deletion
+      if (String(req.user.id) === String(userId)) {
+        return res.status(403).json({ error: 'You cannot delete your own account.' });
+      }
+
+      const [result] = await pool.query('DELETE FROM users WHERE id = ?', [userId]);
+
+      if (!result.affectedRows) {
+        return res.status(404).json({ error: 'User not found.' });
+      }
+
+      return res.json({ success: true });
+    } catch (err) {
+      console.error('Admin DELETE /users/:id error:', err);
+      return res.status(500).json({ error: 'Failed to delete user.' });
+    }
+  });
+
   return router;
 };

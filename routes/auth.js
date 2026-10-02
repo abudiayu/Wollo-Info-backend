@@ -3,6 +3,31 @@ const bcrypt         = require('bcryptjs');
 const jwt            = require('jsonwebtoken');
 const authMiddleware = require('../middleware/authMiddleware');
 
+/* ── Simple in-memory rate limiter (no extra dependency) ──
+   Tracks request counts per IP in a sliding window.
+   Resets the window on every clean interval.              */
+function makeRateLimiter({ windowMs = 60_000, max = 10, message = 'Too many requests, please try again later.' } = {}) {
+  const counts = new Map(); // ip → { count, resetAt }
+  return function rateLimiter(req, res, next) {
+    const ip  = req.ip || req.socket?.remoteAddress || 'unknown';
+    const now = Date.now();
+    let   entry = counts.get(ip);
+    if (!entry || now > entry.resetAt) {
+      entry = { count: 0, resetAt: now + windowMs };
+      counts.set(ip, entry);
+    }
+    entry.count++;
+    if (entry.count > max) {
+      res.set('Retry-After', Math.ceil((entry.resetAt - now) / 1000));
+      return res.status(429).json({ error: message });
+    }
+    next();
+  };
+}
+
+// 10 attempts per minute per IP on auth endpoints
+const authLimiter = makeRateLimiter({ windowMs: 60_000, max: 10, message: 'Too many login attempts. Please wait a minute.' });
+
 module.exports = function authRouter(pool) {
   const router = express.Router();
 
@@ -24,7 +49,7 @@ module.exports = function authRouter(pool) {
   });
 
   /* ── POST /api/auth/register ── */
-  router.post('/register', async (req, res) => {
+  router.post('/register', authLimiter, async (req, res) => {
     try {
       const { full_name, email, password } = req.body;
 
@@ -63,7 +88,7 @@ module.exports = function authRouter(pool) {
   });
 
   /* ── POST /api/auth/login ── */
-  router.post('/login', async (req, res) => {
+  router.post('/login', authLimiter, async (req, res) => {
     try {
       const { email, password } = req.body;
 
