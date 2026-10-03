@@ -1,24 +1,13 @@
 /**
- * Media routes — uses formidable for multipart parsing.
- * formidable is a pure-JS library, no native bindings needed.
- * Install: npm install formidable
- *
- * If formidable is not yet installed, the server will show a helpful message.
+ * Media routes — uses multer (already in package.json) for multipart parsing.
  */
 const express        = require('express');
 const path           = require('path');
 const fs             = require('fs');
 const crypto         = require('crypto');
+const multer         = require('multer');
 const authMiddleware = require('../middleware/authMiddleware');
 const makeAdminOnly  = require('../middleware/adminOnly');
-
-// Try to load formidable; if missing, provide a stub that returns a clear error
-let formidable;
-try {
-  formidable = require('formidable');
-} catch {
-  formidable = null;
-}
 
 const BLOCKED_EXT = new Set([
   '.exe','.bat','.cmd','.sh','.msi','.ps1','.vbs','.jar','.com','.dll',
@@ -32,6 +21,26 @@ const MAX_FILE    = 20 * 1024 * 1024;  // 20 MB
 const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
+/* ── multer storage: random filename, keep extension ── */
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  filename:    (_req, file, cb) => {
+    const ext  = path.extname(file.originalname).toLowerCase();
+    const name = `${Date.now()}-${crypto.randomBytes(10).toString('hex')}${ext}`;
+    cb(null, name);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: MAX_FILE },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (BLOCKED_EXT.has(ext)) return cb(new Error(`File type "${ext}" is not allowed.`));
+    cb(null, true);
+  },
+});
+
 module.exports = function mediaRouter(pool) {
   const router    = express.Router();
   const adminOnly = makeAdminOnly(pool);
@@ -43,78 +52,64 @@ module.exports = function mediaRouter(pool) {
   const guessType = (mime)   => IMAGE_TYPES.has(mime) ? 'image' : 'file';
 
   /* ── POST /api/media/upload ── */
-  router.post('/upload', auth, async (req, res) => {
-    // If formidable isn't installed, return a helpful error
-    if (!formidable) {
-      return res.status(503).json({
-        error: 'File upload requires "formidable". Run: npm install formidable  (in the backend folder)',
-      });
-    }
-
-    // Parse multipart with formidable
-    const form = formidable({
-      uploadDir:        UPLOAD_DIR,
-      keepExtensions:   true,
-      maxFileSize:      MAX_FILE,
-      maxTotalFileSize: MAX_FILE * 20,
-      filename: (_name, ext) =>
-        `${Date.now()}-${crypto.randomBytes(10).toString('hex')}${ext}`,
-      filter: ({ originalFilename }) => {
-        const ext = path.extname(originalFilename || '').toLowerCase();
-        return !BLOCKED_EXT.has(ext);
-      },
-    });
-
-    let fields, files;
-    try {
-      [fields, files] = await form.parse(req);
-    } catch (err) {
-      return res.status(400).json({ error: 'Upload parse error: ' + err.message });
-    }
-
-    // formidable wraps files in arrays
-    const fileList = Object.values(files).flat();
-    if (!fileList.length) return res.status(400).json({ error: 'No valid files uploaded.' });
-
-    const folderId = fields.folder_id?.[0] ? parseInt(fields.folder_id[0], 10) : null;
-    const uploaded = [];
-
-    try {
-      for (const f of fileList) {
-        const mime  = f.mimetype || '';
-        const fsize = f.size     || 0;
-
-        // Extra per-type size check
-        if (IMAGE_TYPES.has(mime) && fsize > MAX_IMAGE) {
-          fs.unlink(f.filepath, () => {});
-          return res.status(400).json({ error: `Image "${f.originalFilename}" exceeds 5 MB.` });
+  router.post('/upload', auth, (req, res) => {
+    // multer processes the multipart body
+    upload.array('files', 50)(req, res, async (err) => {
+      if (err) {
+        // multer size error
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ error: 'File exceeds the 20 MB limit.' });
         }
-
-        const storedName = path.basename(f.filepath);
-        const url        = buildUrl(storedName);
-
-        const [r] = await pool.query(
-          `INSERT INTO media (original_name, stored_name, mime_type, size, type, folder_id, url, uploaded_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [f.originalFilename, storedName, mime, fsize, guessType(mime), folderId, url, req.user.id]
-        );
-
-        uploaded.push({
-          id:            r.insertId,
-          original_name: f.originalFilename,
-          stored_name:   storedName,
-          mime_type:     mime,
-          size:          fsize,
-          type:          guessType(mime),
-          folder_id:     folderId,
-          url,
-        });
+        return res.status(400).json({ error: err.message || 'Upload failed.' });
       }
-      return res.status(201).json(uploaded);
-    } catch (err) {
-      console.error('Media upload DB error:', err);
-      return res.status(500).json({ error: 'Upload failed: ' + err.message });
-    }
+
+      const fileList = req.files || [];
+      if (!fileList.length) {
+        return res.status(400).json({ error: 'No valid files uploaded.' });
+      }
+
+      const folderId = req.body.folder_id ? parseInt(req.body.folder_id, 10) : null;
+      const uploaded = [];
+
+      try {
+        for (const f of fileList) {
+          const mime  = f.mimetype || '';
+          const fsize = f.size     || 0;
+
+          // Extra per-type size check for images
+          if (IMAGE_TYPES.has(mime) && fsize > MAX_IMAGE) {
+            fs.unlink(f.path, () => {});
+            return res.status(400).json({
+              error: `Image "${f.originalname}" exceeds the 5 MB limit.`,
+            });
+          }
+
+          const storedName = f.filename;
+          const url        = buildUrl(storedName);
+
+          const [r] = await pool.query(
+            `INSERT INTO media (original_name, stored_name, mime_type, size, type, folder_id, url, uploaded_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [f.originalname, storedName, mime, fsize, guessType(mime), folderId, url, req.user.id]
+          );
+
+          uploaded.push({
+            id:            r.insertId,
+            original_name: f.originalname,
+            stored_name:   storedName,
+            mime_type:     mime,
+            size:          fsize,
+            type:          guessType(mime),
+            folder_id:     folderId,
+            url,
+          });
+        }
+        return res.status(201).json(uploaded);
+      } catch (dbErr) {
+        console.error('Media upload DB error:', dbErr);
+        return res.status(500).json({ error: 'Upload failed: ' + dbErr.message });
+      }
+    });
   });
 
   /* ── POST /api/media/folder ── */
