@@ -9,6 +9,7 @@ const adminRouter    = require('./routes/admin');
 const mediaRouter    = require('./routes/media');
 const contentRouter  = require('./routes/content');
 const publicRouter   = require('./routes/public');
+const departmentHeadRouter = require('./routes/departmentHead');   // NEW
 
 const {
   PORT        = 5000,
@@ -31,6 +32,19 @@ const pool = mysql.createPool({
   waitForConnections: true, connectionLimit: 10, queueLimit: 0,
   dateStrings: true,
 });
+
+// Adds a column only when it is missing (safe to re-run)
+async function addColumnIfMissing(table, column, definition) {
+  const [found] = await pool.query(
+    `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [DB_NAME, table, column]
+  );
+  if (!found.length) {
+    await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    console.log(`Migration: added ${column} to ${table}.`);
+  }
+}
 
 // ── Ensure all account + content tables exist ───────────────
 async function ensureTables() {
@@ -183,7 +197,88 @@ async function ensureTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  console.log('✓ All tables ready (users + content manager)');
+  // ── Department Head tables (NEW) ────────────────────────────
+
+  // departments (if you already had this table, the missing columns are added below)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS departments (
+      id              INT          NOT NULL AUTO_INCREMENT,
+      name            VARCHAR(150) NOT NULL,
+      description     TEXT             NULL,
+      graduates_count INT          NOT NULL DEFAULT 0,
+      duration_years  INT          NOT NULL DEFAULT 4,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_departments_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+  await addColumnIfMissing('departments', 'description',     'TEXT NULL');
+  await addColumnIfMissing('departments', 'graduates_count', 'INT NOT NULL DEFAULT 0');
+  await addColumnIfMissing('departments', 'duration_years',  'INT NOT NULL DEFAULT 4');
+
+  // department_heads (one head per login, linked to one department)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS department_heads (
+      id            INT          NOT NULL AUTO_INCREMENT,
+      name          VARCHAR(120) NOT NULL,
+      email         VARCHAR(160) NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      department_id INT          NOT NULL,
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_dh_email (email),
+      KEY idx_dh_department (department_id),
+      CONSTRAINT fk_dh_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // department_courses
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS department_courses (
+      id            INT          NOT NULL AUTO_INCREMENT,
+      department_id INT          NOT NULL,
+      course_name   VARCHAR(200) NOT NULL,
+      prerequisites VARCHAR(300) NOT NULL DEFAULT '',
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_dc_department (department_id),
+      CONSTRAINT fk_dc_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // department_interests (students who want a department; student_id = users.id)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS department_interests (
+      id            INT      NOT NULL AUTO_INCREMENT,
+      student_id    INT      NOT NULL,
+      department_id INT      NOT NULL,
+      created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_di_student_dept (student_id, department_id),
+      KEY idx_di_department (department_id),
+      CONSTRAINT fk_di_student    FOREIGN KEY (student_id)    REFERENCES users(id)       ON DELETE CASCADE,
+      CONSTRAINT fk_di_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // department_content (opportunities, motivation, library documents added by heads)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS department_content (
+      id            INT          NOT NULL AUTO_INCREMENT,
+      department_id INT          NOT NULL,
+      head_id       INT          NOT NULL,
+      type          ENUM('opportunity','motivation','document') NOT NULL,
+      title         VARCHAR(200) NOT NULL,
+      body          TEXT             NULL,
+      link_url      VARCHAR(500) NOT NULL DEFAULT '',
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_dcont_department (department_id),
+      CONSTRAINT fk_dcont_department FOREIGN KEY (department_id) REFERENCES departments(id)      ON DELETE CASCADE,
+      CONSTRAINT fk_dcont_head       FOREIGN KEY (head_id)       REFERENCES department_heads(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  console.log('✓ All tables ready (users + content manager + department heads)');
 }
 
 // ── Schema introspection ────────────────────────────────────
@@ -216,10 +311,12 @@ class HttpError extends Error {
   constructor(status, msg) { super(msg); this.status = status; }
 }
 
-// These tables are never accessible via the generic /api/:table routes
+// These tables are never accessible via the generic /api/:table routes.
+// department_heads holds password hashes, so it MUST stay blocked.
 const BLOCKED_TABLES = new Set([
   'users', 'sections', 'content_items', 'content_media',
   'content_versions', 'media', 'media_folders',
+  'department_heads', 'department_interests', 'department_content', 'department_courses',
 ]);
 
 function getTable(name) {
@@ -248,11 +345,13 @@ function pickColumns(table, body) {
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ── Mount auth + admin + content routers ─────────────────────
-app.use('/api/auth',    authRouter(pool));
-app.use('/api/admin',   adminRouter(pool));
-app.use('/api/media',   mediaRouter(pool));
-app.use('/api/content', contentRouter(pool));
-app.use('/api/public',  publicRouter(pool));
+// (all routers are mounted BEFORE the generic /api/:table routes below)
+app.use('/api/auth',            authRouter(pool));
+app.use('/api/admin',           adminRouter(pool));
+app.use('/api/media',           mediaRouter(pool));
+app.use('/api/content',         contentRouter(pool));
+app.use('/api/public',          publicRouter(pool));
+app.use('/api/department-head', departmentHeadRouter(pool));   // NEW
 
 // ── Health ───────────────────────────────────────────────────
 app.get('/api/health', asyncHandler(async (_req, res) => {

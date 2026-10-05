@@ -95,11 +95,24 @@ module.exports = function authRouter(pool) {
       if (!email?.trim()) return res.status(400).json({ error: 'Email is required.' });
       if (!password)      return res.status(400).json({ error: 'Password is required.' });
 
+      const normalEmail = email.trim().toLowerCase();
+
       const [[row]] = await pool.query(
         'SELECT * FROM users WHERE email = ? LIMIT 1',
-        [email.trim().toLowerCase()]
+        [normalEmail]
       );
-      if (!row) return res.status(401).json({ error: 'Invalid email or password.' });
+      if (!row) {
+        const [[deptHead]] = await pool.query(
+          'SELECT id FROM department_heads WHERE email = ? LIMIT 1',
+          [normalEmail]
+        );
+        if (deptHead) {
+          return res.status(401).json({
+            error: 'This account is a department head. Use the department head sign-in page (/department-head).',
+          });
+        }
+        return res.status(401).json({ error: 'Invalid email or password.' });
+      }
 
       const match = await bcrypt.compare(password, row.password_hash);
       if (!match) return res.status(401).json({ error: 'Invalid email or password.' });
@@ -118,6 +131,13 @@ module.exports = function authRouter(pool) {
   /* ── GET /api/auth/me ── */
   router.get('/me', authMiddleware, async (req, res) => {
     try {
+      // Department head tokens carry an id from the department_heads table,
+      // not the users table. Without this guard, a head with id 1 would be
+      // handed the profile of users.id = 1.
+      if (req.user.role === 'department_head') {
+        return res.status(403).json({ error: 'Department heads sign in at the department head page.' });
+      }
+
       const [[row]] = await pool.query(
         'SELECT * FROM users WHERE id = ? LIMIT 1', [req.user.id]
       );
