@@ -34,6 +34,9 @@ const pool = mysql.createPool({
   dateStrings: true,
 });
 
+
+
+
 // Adds a column only when it is missing (safe to re-run)
 async function addColumnIfMissing(table, column, definition) {
   const [found] = await pool.query(
