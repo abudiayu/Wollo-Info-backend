@@ -181,5 +181,63 @@ module.exports = function adminRouter(pool) {
     }
   });
 
+  /* ──────────────────────────────────────────
+     GET /api/admin/staff
+     Returns a unified list of:
+       • users with role = 'staff'
+       • all rows from department_heads (joined with departments)
+     Both are normalised into the same shape so the frontend
+     can display them in one table.
+     ────────────────────────────────────────── */
+  router.get('/staff', async (req, res) => {
+    try {
+      /* Staff rows from the users table */
+      const [staffUsers] = await pool.query(
+        `SELECT id, full_name AS name, email, avatar_url, role,
+                NULL AS department_name, created_at
+           FROM users
+          WHERE role = 'staff'
+          ORDER BY created_at DESC`
+      );
+
+      /* Department heads from the separate table */
+      const [deptHeads] = await pool.query(
+        `SELECT dh.id, dh.name, dh.email, NULL AS avatar_url,
+                'dept_head' AS role,
+                d.name AS department_name, dh.created_at
+           FROM department_heads dh
+           LEFT JOIN departments d ON d.id = dh.department_id
+          ORDER BY dh.created_at DESC`
+      );
+
+      /* Tag the source so the frontend can show different badges */
+      const result = [
+        ...staffUsers.map(r => ({ ...r, source: 'users' })),
+        ...deptHeads.map(r => ({ ...r, source: 'department_heads' })),
+      ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+      return res.json(result);
+    } catch (err) {
+      console.error('Admin GET /staff error:', err);
+      return res.status(500).json({ error: 'Failed to fetch staff.' });
+    }
+  });
+
+  /* ──────────────────────────────────────────
+     DELETE /api/admin/staff/dept-head/:id
+     Removes a department head account.
+     ────────────────────────────────────────── */
+  router.delete('/staff/dept-head/:id', async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const [result] = await pool.query('DELETE FROM department_heads WHERE id = ?', [id]);
+      if (!result.affectedRows) return res.status(404).json({ error: 'Not found.' });
+      return res.json({ success: true });
+    } catch (err) {
+      console.error('Admin DELETE /staff/dept-head/:id error:', err);
+      return res.status(500).json({ error: 'Failed to delete.' });
+    }
+  });
+
   return router;
 };

@@ -9,7 +9,8 @@ const adminRouter    = require('./routes/admin');
 const mediaRouter    = require('./routes/media');
 const contentRouter  = require('./routes/content');
 const publicRouter   = require('./routes/public');
-const departmentHeadRouter = require('./routes/departmentHead');   // NEW
+const departmentHeadRouter  = require('./routes/departmentHead');
+const departmentReviewsRouter = require('./routes/departmentReviews');
 
 const {
   PORT        = 5000,
@@ -278,7 +279,23 @@ async function ensureTables() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  console.log('✓ All tables ready (users + content manager + department heads)');
+  // department_reviews (ratings from students/graduates/visitors)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS department_reviews (
+      id            INT          NOT NULL AUTO_INCREMENT,
+      department_id VARCHAR(100) NOT NULL,
+      name          VARCHAR(120) NOT NULL,
+      role          VARCHAR(20)  NOT NULL DEFAULT 'Student',
+      rating        TINYINT      NOT NULL,
+      comment       TEXT         NOT NULL,
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_dr_dept    (department_id),
+      KEY idx_dr_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  console.log('✓ All tables ready (users + content manager + department heads + reviews)');
 }
 
 // ── Schema introspection ────────────────────────────────────
@@ -351,7 +368,8 @@ app.use('/api/admin',           adminRouter(pool));
 app.use('/api/media',           mediaRouter(pool));
 app.use('/api/content',         contentRouter(pool));
 app.use('/api/public',          publicRouter(pool));
-app.use('/api/department-head', departmentHeadRouter(pool));   // NEW
+app.use('/api/department-head', departmentHeadRouter(pool));
+app.use('/api/departments',    departmentReviewsRouter(pool));
 
 // ── Health ───────────────────────────────────────────────────
 app.get('/api/health', asyncHandler(async (_req, res) => {

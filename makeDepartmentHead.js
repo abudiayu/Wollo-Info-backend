@@ -1,67 +1,81 @@
 /**
- * Creates (or updates) a department head in the `department_heads` table.
- * Edit the four values below, then run once:  node makeDepartmentHead.js
- * Run it again with the same email to update that head instead of failing.
+ * makeDepartmentHead.js
+ * ---------------------
+ * Creates a department + department head account in the database.
+ *
+ * Usage:
+ *   node makeDepartmentHead.js
+ *
+ * Edit the variables below before running.
  */
-require('dotenv').config();
-const bcrypt = require('bcryptjs');
-const mysql  = require('mysql2/promise');
 
-const HEAD_NAME       = 'Dr. Abebe';
-const HEAD_EMAIL      = 'head@wollo.edu.et';
-const HEAD_PASSWORD   = 'ChangeMe123';      // change this before running
-const DEPARTMENT_NAME = 'Medicine';         // created automatically if missing
+require('dotenv').config();
+const mysql  = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
+
+const DEPT_NAME      = 'Medicine';              // must match your departments table
+const HEAD_NAME      = 'Dr. Abebe Girma';
+const HEAD_EMAIL     = 'head.medicine@wollo.edu.et';
+const HEAD_PASSWORD  = 'WolloMed2025!';         // change this
 
 (async () => {
-  let conn;
-  let exitCode = 0;
+  const db = await mysql.createConnection({
+    host:     process.env.DB_HOST     || 'localhost',
+    port:     Number(process.env.DB_PORT) || 3306,
+    user:     process.env.DB_USER     || 'root',
+    password: process.env.DB_PASSWORD || 'root',
+    database: process.env.DB_NAME     || 'wollo-info-hub',
+  });
 
   try {
-    conn = await mysql.createConnection({
-      host:     process.env.DB_HOST     || 'localhost',
-      port:     Number(process.env.DB_PORT) || 3306,
-      user:     process.env.DB_USER     || 'root',
-      password: process.env.DB_PASSWORD || 'root',
-      database: process.env.DB_NAME     || 'wollo-info-hub',
-    });
-
-    const email = HEAD_EMAIL.trim().toLowerCase();
-
-    // 1. Make sure the department exists
-    await conn.query('INSERT IGNORE INTO departments (name) VALUES (?)', [DEPARTMENT_NAME]);
-    const [[dept]] = await conn.query(
-      'SELECT id, name FROM departments WHERE name = ? LIMIT 1',
-      [DEPARTMENT_NAME]
+    /* 1. Ensure the department row exists */
+    await db.query(
+      `INSERT IGNORE INTO departments (name) VALUES (?)`,
+      [DEPT_NAME]
     );
 
-    // 2. Create the head, or update them if the email already exists
-    const password_hash = await bcrypt.hash(HEAD_PASSWORD, 12);
-    const [result] = await conn.query(
-      `INSERT INTO department_heads (name, email, password_hash, department_id)
-       VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         name          = VALUES(name),
-         password_hash = VALUES(password_hash),
-         department_id = VALUES(department_id)`,
-      [HEAD_NAME, email, password_hash, dept.id]
+    const [[dept]] = await db.query(
+      'SELECT id FROM departments WHERE name = ? LIMIT 1',
+      [DEPT_NAME]
     );
 
-    console.log(result.affectedRows === 1 ? 'Department head created' : 'Department head updated');
-    console.log(`   Name       : ${HEAD_NAME}`);
-    console.log(`   Email      : ${email}`);
-    console.log(`   Department : ${dept.name}`);
-    console.log('');
-    console.log('→ Sign in at http://localhost:5173/department-head');
-  } catch (err) {
-    if (err.code === 'ER_NO_SUCH_TABLE') {
-      console.error('❌  Tables are missing. Run "node migrate.js" or start the server once, then try again.');
-    } else {
-      console.error('❌  makeDepartmentHead failed:', err.message);
+    if (!dept) {
+      console.error(`Department "${DEPT_NAME}" not found even after insert.`);
+      process.exit(1);
     }
-    exitCode = 1;
-  } finally {
-    if (conn) await conn.end();
-  }
 
-  process.exit(exitCode);
+    /* 2. Check for existing head with that email */
+    const [[existing]] = await db.query(
+      'SELECT id FROM department_heads WHERE email = ? LIMIT 1',
+      [HEAD_EMAIL]
+    );
+
+    if (existing) {
+      console.log(`Department head already exists with email: ${HEAD_EMAIL}`);
+      console.log('To reset the password, delete the row and re-run this script.');
+      await db.end();
+      return;
+    }
+
+    /* 3. Create the head account */
+    const hash = await bcrypt.hash(HEAD_PASSWORD, 12);
+    const [r] = await db.query(
+      `INSERT INTO department_heads (name, email, password_hash, department_id)
+       VALUES (?, ?, ?, ?)`,
+      [HEAD_NAME, HEAD_EMAIL, hash, dept.id]
+    );
+
+    console.log('');
+    console.log('✅  Department head created successfully!');
+    console.log('');
+    console.log(`   Department : ${DEPT_NAME} (id ${dept.id})`);
+    console.log(`   Name       : ${HEAD_NAME}`);
+    console.log(`   Email      : ${HEAD_EMAIL}`);
+    console.log(`   Password   : ${HEAD_PASSWORD}`);
+    console.log(`   Head ID    : ${r.insertId}`);
+    console.log('');
+    console.log('Login at /department-head');
+  } finally {
+    await db.end();
+  }
 })();
